@@ -61,6 +61,14 @@ Thumbs.db
 
 # Tests/coverage (如有)
 coverage/
+
+# Models (大文件不要直接提交，建议用 Git LFS 或 Releases)
+model/
+*.gguf
+*.bin
+*.pt
+*.onnx
+*.ckpt
 # Ignore build directories
 /build/
 /data/
