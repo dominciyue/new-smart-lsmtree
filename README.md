@@ -86,15 +86,42 @@ git push
 ---
 
 ## 模型下载与放置
-出于体积限制，模型文件不随仓库分发。请从 Releases 或外部链接下载后放置到 `model/` 目录：
+本仓库通过 Git LFS 托管模型文件。首次克隆/拉取后，请执行：
 
+```bash
+# 一键初始化（建议）
+git lfs install
+git lfs pull
+git submodule update --init --recursive
+```
+
+模型放置路径：
 ```text
 smart_lsm-tree/
   model/
     nomic-embed-text-v1.5.Q8_0.gguf
 ```
 
-`.gitignore` 已忽略 `model/` 与常见大模型后缀；若团队协作需要，也可以改用 Git LFS 托管。
+说明：
+- 若未安装 Git LFS，拉到的将是一个小的“指针文件”，运行前必须执行 `git lfs install && git lfs pull`。
+- 如需改用 GitHub Releases 或外部链接分发模型，可将下载的模型同样放到 `model/` 目录。
+- `.gitignore` 已忽略 `model/` 与常见大模型后缀，避免误提交；维护者若需提交新模型，请使用 Git LFS 并 `git add -f model/<file>`。
+
+---
+
+## 一键初始化（克隆后直接可构建）
+```bash
+# 克隆（已存在本地可跳过）
+# git clone https://github.com/<you>/new-smart-lsmtree.git
+# cd new-smart-lsmtree
+
+# 拉取子模块 + LFS 模型
+git submodule update --init --recursive
+git lfs install
+git lfs pull
+```
+
+随后按“快速开始”选择你的平台构建。
 
 ---
 
@@ -140,6 +167,32 @@ cmake --build build --config Release
 - 运行测试：
 ```bash
 ctest --test-dir build -C Release -V
+```
+
+---
+
+## Embedding 模块使用示例
+`embedding/` 基于 `llama.cpp` 封装了简单的向量生成接口。在你的 C++ 代码中：
+
+```cpp
+#include "embedding/embedding.h"
+
+int main() {
+  std::vector<float> v = embedding_single("hello world");
+
+  std::vector<std::vector<float>> vs = embedding("apple\nbanana\norange");
+
+  // 程序结束前释放模型资源
+  embedding_cleanup();
+  return 0;
+}
+```
+
+构建时确保链接到 `embedding`、`llama` 与 `common`（见 `embedding/CMakeLists.txt`）。如果你使用本仓库提供的 CMake 入口，默认会一并编译。
+
+运行内置测试（示例）：
+```bash
+ctest --test-dir build -V -R Embedding_Test
 ```
 
 ---
