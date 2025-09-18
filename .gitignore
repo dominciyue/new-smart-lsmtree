@@ -1,0 +1,101 @@
+# CMake build directories
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+Testing/
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+Makefile
+cmake_install.cmake
+
+# Visual Studio/VSCode (若有)
+.vscode/
+.vs/
+*.code-workspace
+
+# Compiled binaries/objects
+*.o
+*.obj
+*.lo
+*.la
+*.al
+*.libs
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+*.out
+*.app
+*.pdb
+
+# Logs/temp
+*.log
+*.tmp
+*.cache
+*.swp
+.DS_Store
+Thumbs.db
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+*.toc
+*.out
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.log
+
+# Tests/coverage (如有)
+coverage/
+# Ignore build directories
+/build/
+/data/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/Makefile
+
+# Ignore executables and libraries
+*.exe
+*.out
+*.app
+*.log
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Ignore generated files
+*.o
+*.obj
+*.gch
+
+# Ignore IDE specific files
+.idea/
+.vscode/
+*.swp
+
+# Ignore OS specific files
+.DS_Store
+Thumbs.db
+
+persistence
+bench
+correctness
+
+model

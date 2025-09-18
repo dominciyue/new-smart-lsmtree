@@ -1,0 +1,337 @@
+From a31163d30b924165e1b7958b964cdac332950779 Mon Sep 17 00:00:00 2001
+From: Tong Xin <xin_tong@sjtu.edu.cn>
+Date: Mon, 31 Mar 2025 20:36:42 +0800
+Subject: [PATCH] =?UTF-8?q?=E6=9B=B4=E6=96=B0README=E6=96=87=E6=A1=A3?=
+ =?UTF-8?q?=E4=BB=A5=E5=8F=8D=E6=98=A0=E9=A1=B9=E7=9B=AE=E9=98=B6=E6=AE=B5?=
+ =?UTF-8?q?2=E7=9A=84=E7=9B=AE=E6=A0=87=E5=92=8C=E7=BB=93=E6=9E=84?=
+ =?UTF-8?q?=EF=BC=8C=E5=B9=B6=E6=B7=BB=E5=8A=A0E2E=E6=B5=8B=E8=AF=95?=
+ =?UTF-8?q?=E6=96=87=E4=BB=B6=E4=BB=A5=E9=AA=8C=E8=AF=81KVStore=E7=9A=84?=
+ =?UTF-8?q?=E6=AD=A3=E7=A1=AE=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md         | 141 +++++++++++++++++++++++-----------------------
+ test/E2E_test.cpp | 141 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 210 insertions(+), 72 deletions(-)
+ create mode 100644 test/E2E_test.cpp
+
+diff --git a/README.md b/README.md
+index 2b014c1..87ee32a 100644
+--- a/README.md
++++ b/README.md
+@@ -1,93 +1,90 @@
+-# Project Stage1 LSM-KV: KVStore using Log-structured Merge Tree
++# Project阶段2: Smart LSM
+ 
+-## Overview
+-This project implements a key-value store based on the Log-Structured Merge-Tree (LSM-Tree) architecture. The system consists of memory components using SkipList and disk components using hierarchical SSTables, with Bloom Filters for efficient key existence checks.
++**强烈建议**：在开始实验之前，先**认真**阅读本文档，确保了解了实验的目的、内容和要求后再开始动手编写代码。
++
++## Introduction
++
++现代存储系统面临非结构化数据处理的重大挑战。**LSM-tree（Log-Structured Merge Tree** 作为高性能存储引擎，通过顺序写优化和层级合并机制，在键值存储领域占据重要地位。然而传统LSM-tree仅支持精确键值查询，难以应对**语义相似性搜索**需求。
++
++本阶段将基于LSM-tree架构，通过集成**语义嵌入模型（Embedding Model）** 与 **近似最近邻搜索（ANN）** 算法，赋予存储引擎语义检索能力。
++
++## Background
++
++在电商推荐系统等典型场景中，商品特征常以高维向量形式存在。传统LSM-tree能高效存储键值对，但面对"查找与'水果'语义相似的商品"这类查询时，存在局限：**仅支持精确键匹配，无法处理语义相似性**。
++
++在这个阶段，你将会为你的LSM-tree添加语义检索功能，设计实现一个 `Smart LSM-tree`。
++
++## Process Overview
++
++例如，往LSM-tree中插入KV对如下：
+ 
+-## Project Structure
+ ```
+-.
+-├── CMakeLists.txt            // CMake configuration
+-├── MurmurHash3.h             // MurmurHash3 implementation
+-├── README.md                 // Project documentation
+-├── bloom.cpp                 // Bloom Filter implementation
+-├── bloom.h                   // Bloom Filter header
+-├── correctness.cc            // Correctness test (do not modify)
+-├── kvstore.cc                // KVStore core implementation
+-├── kvstore.h                 // KVStore header
+-├── kvstore_api.h             // KVStore API interface (do not modify)
+-├── persistence.cc            // Persistence test (do not modify)
+-├── skiplist.cpp              // SkipList implementation
+-├── skiplist.h                // SkipList header
+-├── sstable.cpp               // SSTable disk operations
+-├── sstable.h                 // SSTable data structure
+-├── sstablehead.cpp           // SSTable header management
+-├── sstablehead.h             // SSTable header definition
+-├── test.h                    // Testing base class (do not modify)
+-└── utils.h                   // Cross-platform file utilities
++3 -> apple
++4 -> banana
++5 -> pear
++6 -> sky
+ ```
+ 
+-## Key Components
++之后，搜索字符串 `"fruit"`最相近的3个向量。你的 `LSM-tree`预期返回 `3 -> apple`、`4 -> banana`、`5 -> pear`这三个KV对。
+ 
+-### Core Modules
+-• **SkipList (skiplist.h/cpp)**  
+-  In-memory ordered data structure storing recent writes with O(log n) time complexity for insert/search operations.
++## Implementation Tips
+ 
+-• **SSTable (sstable.h/cpp)**  
+-  Disk-based storage structure containing:
+-  • Header section (timestamp, entry count, key range)
+-  • Bloom Filter section for fast key existence checks
+-  • Key-Value entries sorted by key
++为了支持语义检索，你在搜索过程中可以使用phase2 warmup阶段提供的embedding模型。`LSM-tree`中的 `Value`转化为向量。
+ 
+-• **SSTable Header (sstablehead.h/cpp)**  
+-  Manages SSTable metadata including:
+-  • Timestamp generation
+-  • Key range tracking (min/max keys)
+-  • Entry count management
++对于向量的相似程度计算，你需要使用**余弦相似度**来计算两个向量之间的相似程度。
+ 
+-• **Bloom Filter (bloom.h/cpp)**  
+-  Probabilistic data structure using MurmurHash3 for efficient membership queries, reducing unnecessary disk reads.
++你可以使用以下公式来计算两个向量之间的余弦相似度：
+ 
+-### Interface
+-• **KVStoreAPI (kvstore_api.h)**  
++$$
++\text{cosine\_similarity}(A, B) = \frac{A \cdot B}{||A|| \cdot ||B||}
++$$
++其中，$A$和$B$是两个向量，$A \cdot B$表示它们的点积，$||A||$和$||B||$分别表示它们的模长。
+ 
+-core APIs:
+-  ```cpp
+-  class KVStoreAPI {
+-    virtual void put(uint64_t key, const std::string &s) = 0;
+-    virtual std::string get(uint64_t key) = 0;
+-    virtual bool del(uint64_t key) = 0;
+-    };
+ 
+-  ```
++## Task
+ 
+-### Storage Hierarchy
+-1. **Memory Tier**  
+-   • Active SkipList for write operations
+-   • Immutable SkipLists ready for compaction
++- 在前一阶段LSM-tree的基础上，你需要实现接口 `std::vector<std::pair<std::uint64_t, std::string>> KVStore::search_knn(std::string query, int k)`，该接口接受一个查询字符串和一个整数 `k`，返回与查询字符串最相近的 `k`个向量的key和value。并且按照向量 `余弦相似度`从高到低的顺序排列。`E2E_test.cpp`不会因浮点数精度影响结果，之后的测试也会容忍一定的浮点数计算误差。
++- 请注意LSMtree增删改查功能可能都要对应修改。
++- 在这一阶段，你可以遍历LSM-tree中的KV对进行匹配，不需要考虑太多性能相关的问题。
++- 在这一阶段，你需要保证key、value持久化，能通过上一阶段的 `persistence`和 `correctness`。但是这个阶段不需要考虑向量的持久化。
++- 请把向量存储在内存中，如果每次KV操作都重新计算向量，性能会很差。
+ 
+-2. **Disk Tier**  
+-   • Leveled SSTable organization
+-   • Compaction process merges and reorganizes SSTables
++作为一个project，你只需要完成要求的接口以保证测试用例能够正常运行，我们不对你的实现细节要求做过多限制。
+ 
+-## Build & Test
++### Compare
+ 
+-### Build Instructions
+-```bash
+-cmake -B build             # Initial configuration
+-make -C build              # Compile project
+-```
++请你对这次的系统运行进行分模块的计时分析，探索在程序中, 每个模块运行的时间(模块的划分由你来决定, **但是不用深入 `LLAMA.CPP` 的源代码内部**)。将以上内容写入到报告中。
++
++你可以在每个部分开始前调用计时函数，在每个部分结束后调用计时函数，计算时间差，得到这部分的运行时间。
++
++推荐使用 `std::chrono`库来实现计时功能。
+ 
+-### Run Tests
+-```bash
+-./build/correctness        # Validate functional correctness
+-./build/persistence        # Verify data durability
++### Test
++
++在 `test`目录下有一个测试，供你调试自己的代码。
++
++- `E2E_Test`：一个简单的端到端测试，测试你的整个系统是否正确。
++
++## Build & Run
++
++### Mac/Linux/Windows
++
++请确保你的环境中已经安装了 `cmake`和C++编译器。
++
++```
++cmake -B build
++cmake --build build --parallel
++./build/test/...
+ ```
+ 
+-Test execution may take **several minutes** to complete due to comprehensive stress testing. Ensure all test files are restored to original versions before final submission.
++## Report
++
++你可以基于这个模板[report_template](https://latex.sjtu.edu.cn/4184116212ttcjdwbsfbgc#2b04b7)来撰写你的报告，详情参见链接里的模板内容。
++
++报告应为pdf格式，命名为 `学号_姓名.pdf`，例如 `523030912345_张三.pdf`。会由canvas上单独的报告提交链接进行提交。
++
++## Submission
+ 
+-## Implementation Notes
++请将你的代码打包成 `zip`格式，命名为 `学号_姓名.zip`，例如 `523030912345_张三.zip`
+ 
+-1. Please read all the documents we provide carefully to make sure you understand all the details of implementing lsm-tree.
+-2. You can continue to implement it based on the sstable.cpp file we implemented, or you can implement it completely by yourself. If you choose to implement it completely by yourself, please make sure you implement it according to the conventions of kvstore_api.h.
+-3. You should implement code in `kvstore.cc` and another file(*go and find it*), you can search `TODO here` to help you locate the position.
+-4. To reduce your workload, **you only have three todos**, but be sure to implement them carefully to ensure that you understand the lsm tree.
++请不要上传你的 `build`、`data`、`model`、`test`目录，只需要上传你的项目的其他内容。
+diff --git a/test/E2E_test.cpp b/test/E2E_test.cpp
+new file mode 100644
+index 0000000..7bbf6a5
+--- /dev/null
++++ b/test/E2E_test.cpp
+@@ -0,0 +1,141 @@
++#include "../test.h"
++#include <fstream>
++#include <iostream>
++#include <string>
++
++#include <cassert>
++#include <cstdint>
++#include <iostream>
++#include <string>
++#include <fstream>
++
++
++std::vector<std::string> read_file(std::string filename) {
++	// read file from ./data/trimmed_text
++	// every line is a string
++	// skip all the lines that are empty
++	std::ifstream file(filename);
++    if (!file.is_open()) {
++        std::cerr<<"Failed to open file: "<<filename<<std::endl;
++        return {};
++    }
++    std::string line;
++    std::vector<std::string> temp;
++    while (std::getline(file, line)) {
++        //std::cout<<line<<std::endl;
++        // check if all characters in the line cannot be seen
++        // 检查是不是全是不可见字符
++        bool exist_alpha = false;
++        for (auto c : line) {
++            if (isalpha(c)) {
++                exist_alpha = true;
++                break;
++            }
++        }
++        if (!exist_alpha) {
++            continue;
++        }
++        if (line.empty())
++            continue;
++        if(line.size() < 30) {
++            continue;
++        }
++        // std::cout<<line<<std::endl;
++        temp.push_back(line);
++    }
++    file.close();
++    return temp;
++}
++
++class CorrectnessTest : public Test {
++private:
++    const uint64_t SIMPLE_TEST_MAX = 512;
++    const uint64_t MIDDLE_TEST_MAX  = 1024 * 64;
++    const uint64_t LARGE_TEST_MAX  = 1024 * 64;
++
++    void text_test(uint64_t max) {
++        uint64_t i;
++        auto trimmed_text = read_file("./data/trimmed_text.txt");
++        max = std::min(max, (uint64_t)trimmed_text.size());
++        for (i = 0; i < max; ++i) {
++            store.put(i, trimmed_text[i]);
++        }
++
++        for (i = 0; i < max; ++i)
++            EXPECT(trimmed_text[i], store.get(i));
++        // phase();
++        
++        // run the search_knn, and compare the result to ./data/test_text_ans.txt
++        auto test_text = read_file("./data/test_text.txt");
++        max = std::min(max, (uint64_t)test_text.size());
++
++        std::vector<std::string> ans;
++        std::ifstream file("./data/test_text_ans.txt");
++        if (!file.is_open()) {
++            std::cerr << "Failed to open the file" << std::endl;
++            return;
++        }
++        std::string line;
++        while (std::getline(file, line)) {
++            ans.push_back(line);
++        }
++        file.close();
++        int idx = 0;
++        for (i = 0; i < max; ++i) {
++            auto res = store.search_knn(test_text[i], 5);
++            for(auto j : res) {
++                EXPECT(ans[idx], j.second);
++                EXPECT(store.get(j.first), j.second);
++                idx++;
++            }
++        }
++        phase();
++
++    }
++
++public:
++    CorrectnessTest(const std::string &dir, bool v = true) : Test(dir, v) {}
++
++    void start_test(void *args = NULL) override {
++        std::cout << "KVStore Correctness Test" << std::endl;
++
++        // store.reset();
++
++        // std::cout << "[Simple Test]" << std::endl;
++        // regular_test(SIMPLE_TEST_MAX);
++
++        // store.reset();
++
++        // std::cout << "[Middle Test]" << std::endl;
++        // regular_test(MIDDLE_TEST_MAX);
++
++        // store.reset();
++        std::cout << "[Text Test]" << std::endl;
++        // regular_test(LARGE_TEST_MAX);
++        text_test(80);
++
++        //        store.reset();
++        //        std::cout << "[Insert Test]" << std::endl;
++        //        insert_test(1024 * 16);
++
++        //        store.reset();
++        //        std::cout << "[delete test]" << std::endl;
++        //        delete_test(1024 * 64);
++    }
++};
++
++int main(int argc, char *argv[]) {
++    bool verbose = (argc == 2 && std::string(argv[1]) == "-v");
++
++    std::cout << "Usage: " << argv[0] << " [-v]" << std::endl;
++    std::cout << "  -v: print extra info for failed tests [currently ";
++    std::cout << (verbose ? "ON" : "OFF") << "]" << std::endl;
++    std::cout << std::endl;
++    std::cout.flush();
++
++    CorrectnessTest test("./data", verbose);
++
++    test.start_test();
++
++    return 0;
++}
+\ No newline at end of file
+-- 
+2.39.5 (Apple Git-154)
+

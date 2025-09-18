@@ -1,0 +1,255 @@
+\documentclass{ctexart} % 使用 ctexart 支持中文，更适合 XeLaTeX
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{minted} % 用于代码高亮
+\usepackage{fontspec} % 允许选择系统字体
+\usepackage{xeCJK}    % XeLaTeX CJK 支持
+
+\setmainfont{Times New Roman} % 设置英文字体 (可选, 根据你的系统和喜好)
+\setCJKmainfont{SimSun}      % 设置中文字体 (可选, 例如宋体, 确保你的系统有这些字体)
+
+\geometry{a4paper, margin=1in}
+
+\title{Project 阶段5：HNSW索引保存并行化报告}
+\author{Your Name} % 请替换成你的名字
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{引言}
+在现代键值存储（KVStore）系统中，近似最近邻（ANN）搜索是一个核心功能，而 HNSW (Hierarchical Navigable Small World) 是实现 ANN 的一种高效算法。随着数据量的增加，HNSW 索引的构建、维护和持久化变得越来越耗时。本报告聚焦于对 HNSW 索引的持久化过程，即 \mintinline{cpp}{KVStore::save_hnsw_index_to_disk} 函数，进行并行化改造，旨在提升其执行效率，并分析并行化带来的性能改善。
+
+\section{并行化目标与串行性能分析}
+
+\subsection{并行化逻辑选择}
+我们选择并行化的核心逻辑是 \mintinline{cpp}{KVStore::save_hnsw_index_to_disk} 函数中对 HNSW 图中各个活动节点数据的保存过程。对于每一个未被标记为删除的活动 HNSW 节点，其持久化过程涉及到一系列独立的文件操作：
+\begin{itemize}
+    \item 在指定的 HNSW 索引根目录下的 \mintinline{text}{nodes} 子目录中，为该节点创建一个以其标签（label）命名的专属子目录（例如，\mintinline{text}{./hnsw_data_large_parallel/nodes/NODE_LABEL/}）。
+    \item 在该节点专属子目录中，创建并写入 \mintinline{text}{header.bin} 文件。该文件包含节点的元信息，如节点在 HNSW 图中存在的最高层级 (\mintinline{cpp}{node.max_level}) 以及该节点对应的 KVStore 中的键 (\mintinline{cpp}{key})。
+    \item 在该节点专属子目录中，进一步创建 \mintinline{text}{edges} 子目录。
+    \item 在 \mintinline{text}{edges} 目录中，为该节点在 HNSW 图中实际存在的每一个层级（从层0到 \mintinline{cpp}{node.max_level}），创建一个以层级号命名的二进制文件（例如 \mintinline{text}{0.bin}, \mintinline{text}{1.bin} 等）。每个这样的层级文件首先写入该层级的邻居数量（一个 \mintinline{cpp}{uint32_t} 类型的值），随后紧跟所有邻居节点的标签（每个标签也是 \mintinline{cpp}{uint32_t} 类型）。
+\end{itemize}
+由于不同 HNSW 节点的文件保存操作在逻辑上是相互独立的，即一个节点的保存不依赖于其他节点的保存状态（除了最终的汇总统计），这为并行处理提供了良好的基础。
+
+\subsection{测试环境与数据集}
+所有性能测试均在以下环境中进行：
+\begin{itemize}
+    \item 操作系统：Windows (请根据您的实际环境具体填写，例如 Windows 11 Pro)
+    \item CPU：(请根据您的实际环境具体填写，例如 Intel Core i9-13900K @ 3.00GHz)
+    \item 内存：(请根据您的实际环境具体填写，例如 32GB DDR5 RAM)
+    \item 存储：(请根据您的实际环境具体填写，例如 NVMe PCIe 4.0 SSD)
+    \item 编译器：(请根据您的实际环境具体填写，例如 MinGW-w64 g++ 11.2.0)
+\end{itemize}
+测试数据集包含100,000个文本条目及其对应的768维嵌入向量。数据分别从位于 \mintinline{text}{D:/lab-lsm-tree-handout/large_dataset/} 目录下的 \mintinline{text}{cleaned_text_100k.txt}（文本）和 \mintinline{text}{embedding_100k.txt}（预计算的嵌入向量）文件加载。测试程序 \mintinline{text}{phase5_large_data_test.cc} 首先将这100,000条数据通过 \mintinline{cpp}{kvstore.put_with_precomputed_embedding} 方法插入到 KVStore 实例中，完成 HNSW 图的构建。
+
+\subsection{串行性能基准}
+在完成100,000条数据的加载和 HNSW 图构建后，我们调用 \mintinline{cpp}{kvstore.save_hnsw_index_to_disk(path, true)}，强制以串行方式执行 HNSW 索引的保存。通过 \mintinline{text}{phase5_large_data_test.exe} 记录的时间如下：
+
+\textbf{HNSW 索引串行保存总耗时 (100,000 条目)：155.1897 秒}
+
+此时间将作为评估后续并行化效果的基准。
+
+\section{并行化设计方案}
+
+\subsection{线程池的应用}
+为了有效管理并发任务并避免频繁创建和销毁线程所带来的开销，我们采用了线程池（\mintinline{cpp}{ThreadPool}）模型。该线程池类的实现严格遵循了 \mintinline{text}{Phase5.md} 中提供的示例代码。线程池在初始化时会创建一组工作线程，其数量通过 \mintinline{cpp}{std::thread::hardware_concurrency()} 查询得到，这通常对应于系统可用的逻辑 CPU 核心数。这种设计旨在充分利用多核处理器的并行处理能力。
+
+\subsection{任务划分与封装}
+在 \mintinline{cpp}{KVStore::save_hnsw_index_to_disk} 函数的并行保存模式下，其核心任务处理流程如下：
+\begin{enumerate}
+    \item 主线程遍历内存中缓存的所有 HNSW 节点 (\mintinline{cpp}{hnsw_nodes_})。
+    \item 对于每一个未被内部标记为 \mintinline{cpp}{deleted} 的活动节点，将其完整的持久化操作（包括创建节点目录、写入节点 \mintinline{text}{header.bin} 文件、创建 \mintinline{text}{edges} 子目录、以及写入该节点所有层级的 \mintinline{text}{level.bin} 边文件）封装成一个独立的、可执行的任务单元。
+    \item 每个任务单元均通过一个 C++ lambda 表达式来定义。该 lambda 表达式通过值捕获（value capture）和引用捕获（reference capture）相结合的方式，获取执行节点保存操作所需的数据和资源：
+    \begin{itemize}
+        \item \texttt{label} (\mintinline{cpp}{size_t}, 值捕获): 当前被处理节点的 HNSW 标签。
+        \item \texttt{node\_copy} (\mintinline{cpp}{HNSWNode}, 值捕获): 当前被处理节点 \mintinline{cpp}{HNSWNode} 对象的一个完整拷贝。采用值拷贝是为了确保线程安全，使得每个工作线程操作的是各自独立的数据副本，避免了对原始 \mintinline{cpp}{hnsw_nodes_} 中对象的潜在并发访问冲突。
+        \item \texttt{node\_specific\_base\_path} (\mintinline{cpp}{std::string}, 值捕获): 为当前节点构造的、用于保存其相关文件的特定基础目录路径字符串。
+        \item \texttt{saved\_node\_count\_atomic} (\mintinline{cpp}{std::atomic<int> &}, 引用捕获): 指向一个原子整型计数器的引用。当一个线程成功完成一个节点的保存后，会通过此原子计数器安全地增加已成功保存的节点总数。
+        \item \texttt{cerr\_mutex} (\mintinline{cpp}{std::mutex &}, 引用捕获): 指向一个互斥锁的引用，用于在多线程环境下同步对标准错误流 \mintinline{cpp}{std::cerr} 的输出，防止并发写入时产生的错误信息交错混乱。
+    \end{itemize}
+    \item 如此封装好的 lambda 任务随后通过调用线程池实例的 \mintinline{cpp}{pool.enqueue()} 方法，被提交到线程池内部的任务队列中，等待空闲的工作线程拾取并执行。
+\end{enumerate}
+通过上述机制，每个活动 HNSW 节点的保存工作都被转化为一个独立的任务，由线程池中的工作线程并发地执行，从而达到并行处理的目的。
+
+\subsection{同步机制与执行流程}
+整个 HNSW 索引保存过程的同步和流程控制如下：
+\begin{itemize}
+    \item \textbf{前置串行操作}：在启动任何并行任务之前，主线程会串行执行一些初始化步骤：
+    \begin{enumerate}
+        \item 创建用户指定的 HNSW 数据根目录（例如 \mintinline{text}{./hnsw_data_large_parallel/}）。
+        \item 在根目录下创建名为 \mintinline{text}{nodes} 的子目录，用于存放所有单独的节点数据。
+        \item 准备并写入 \mintinline{text}{global_header.bin} 文件。此文件位于 HNSW 数据根目录下，包含 HNSW 图的全局元信息，如 M、\mintinline{cpp}{M_max}、\mintinline{cpp}{efConstruction} 等参数，以及当前图的最高层级、入口点标签、活动节点总数和向量维度。活动节点总数是在主线程中遍历 \mintinline{cpp}{hnsw_nodes_} 预先计算得到的。
+    \end{enumerate}
+    \item \textbf{并行节点保存}：如上一节所述，所有活动节点的保存任务被分发到线程池中并发执行。
+    \item \textbf{原子计数器}：每个线程在成功完成一个节点的完整保存操作后，会通过 \mintinline{cpp}{saved_node_count_atomic.fetch_add(1)} 原子地增加成功保存的节点数。
+    \item \textbf{线程池同步}：\mintinline{cpp}{ThreadPool} 类的析构函数被设计为会等待其内部任务队列中的所有任务执行完毕。这是通过在析构函数中对每个工作线程调用 \mintinline{cpp}{worker.join()} 实现的。因此，当 \mintinline{cpp}{save_hnsw_index_to_disk} 函数中包含 \mintinline{cpp}{ThreadPool} 实例的作用域结束时（即线程池对象被销毁时），可以保证所有已提交的节点保存任务都已经得到了处理（成功或失败）。
+    \item \textbf{后置串行操作}：在所有并行节点保存任务完成后，主线程会继续串行执行：
+    \begin{enumerate}
+        \item 打印并行处理阶段由线程实际完成的节点数量（从 \mintinline{cpp}{saved_node_count_atomic} 获取）。
+        \item 检查此数量是否与 \mintinline{text}{global_header.bin} 中记录的预期活动节点数一致，若不一致则打印警告。
+        \item 写入 \mintinline{text}{deleted_nodes.bin} 文件。此文件位于 HNSW 数据根目录下，用于持久化那些在 HNSW 图中已被标记为删除、但其原向量数据需要被记录下来的向量列表（主要用于后续搜索的精确过滤）。
+    \end{enumerate}
+\end{itemize}
+
+\subsection{代码实现概览}
+以下是 \mintinline{cpp}{KVStore::save_hnsw_index_to_disk} 函数经过并行化改造后的核心结构，展示了串行与并行路径的选择以及并行任务的提交：
+\begin{minted}[linenos, frame=lines, framesep=2mm, fontsize=\scriptsize]{cpp}
+// In kvstore.cc
+void KVStore::save_hnsw_index_to_disk(const std::string &hnsw_data_root, bool force_serial /*= false*/) {
+    std::cout << "[INFO] Attempting HNSW index save to disk: " << hnsw_data_root 
+              << (force_serial ? " (SERIAL)" : " (PARALLEL)") << std::endl;
+    std::atomic<int> saved_node_count_atomic(0); 
+
+    try {
+        // 1. 创建根目录和 nodes 子目录 (串行)
+        std::filesystem::create_directories(hnsw_data_root);
+        std::string nodes_path = hnsw_data_root + "/nodes";
+        std::filesystem::create_directories(nodes_path);
+
+        // 2. 准备并写入全局头文件 (串行)
+        HNSWGlobalHeader global_header;
+        // ... (填充 global_header 结构体) ...
+        uint64_t active_node_count = 0;
+        for (const auto& pair : hnsw_nodes_) {
+            if (!pair.second.deleted) active_node_count++;
+        }
+        global_header.num_nodes = active_node_count;
+        // ... (继续填充 global_header) ...
+        std::string global_header_path = hnsw_data_root + "/global_header.bin";
+        std::ofstream header_file_stream(global_header_path, std::ios::binary | std::ios::trunc);
+        // ... (写入 header_file_stream) ...
+        std::cout << "[INFO] Saved global header. Expected active nodes: " 
+                  << global_header.num_nodes << " to " << global_header_path << std::endl;
+
+        // 3. 保存 HNSW 节点数据 (条件并行)
+        if (force_serial) {
+            std::cout << "[INFO] Saving HNSW nodes SERIALLY to " << nodes_path << "..." << std::endl;
+            uint64_t serial_saved_node_count = 0; 
+            for (const auto& pair : hnsw_nodes_) {
+                // ... (单个节点的串行保存逻辑，包括创建目录、写header.bin、写各层级的edges/LEVEL.bin) ...
+                // ... (错误处理) ...
+                // serial_saved_node_count++;
+            }
+            saved_node_count_atomic.store(serial_saved_node_count);
+            std::cout << "[INFO] Finished processing HNSW node data SERIALLY. Nodes processed: " 
+                      << serial_saved_node_count << "." << std::endl;
+        } else { // Parallel saving
+            std::cout << "[INFO] Saving HNSW nodes PARALLELLY to " << nodes_path << "..." << std::endl;
+            unsigned int num_threads = std::thread::hardware_concurrency();
+            if (num_threads == 0) num_threads = std::max(1u, 2u); 
+            ThreadPool pool(num_threads);
+            std::mutex cerr_mutex; 
+
+            for (const auto& pair : hnsw_nodes_) {
+                const size_t label = pair.first;
+                const HNSWNode& node_ref = pair.second; 
+                if (node_ref.deleted) continue;
+                
+                HNSWNode node_copy = node_ref; 
+                std::string node_specific_base_path = nodes_path + "/" + std::to_string(label);
+
+                pool.enqueue([label, node_copy, node_specific_base_path, 
+                              &saved_node_count_atomic, &cerr_mutex]() {
+                    try {
+                        std::filesystem::create_directories(node_specific_base_path);
+                        // 节点 header.bin 写入
+                        std::string disk_node_header_path = node_specific_base_path + "/header.bin"; 
+                        std::ofstream node_header_ostream(disk_node_header_path, std::ios::binary | std::ios::trunc); 
+                        // ... (填充并写入 NodeHeader disk_node_header_data) ...
+                        node_header_ostream.close();
+
+                        // 节点 edges/LEVEL.bin 写入
+                        std::string edges_dir_path = node_specific_base_path + "/edges";
+                        std::filesystem::create_directories(edges_dir_path);
+                        for (int level = 0; level <= node_copy.max_level; ++level) {
+                            if (level < node_copy.connections.size() && !node_copy.connections[level].empty()) {
+                                std::string edge_file_path = edges_dir_path + "/" + std::to_string(level) + ".bin";
+                                std::ofstream edge_file(edge_file_path, std::ios::binary | std::ios::trunc);
+                                // ... (写入 num_edges 和所有邻居标签) ...
+                                edge_file.close();
+                            }
+                        }
+                        saved_node_count_atomic++; 
+                    } catch (const std::filesystem::filesystem_error& fs_err) { /* ... */ }
+                      catch (const std::exception& e) { /* ... */ } 
+                      catch (...) { /* ... */ }
+                });
+            }
+            // 线程池在此作用域结束时自动join所有线程
+        }
+        // ... (检查保存的节点数与预期是否一致) ...
+
+        // 保存 deleted_nodes.bin (串行)
+        std::string deleted_nodes_path = hnsw_data_root + "/deleted_nodes.bin";
+        // ... (写入 hnsw_vectors_to_persist_as_deleted_ 中的向量) ...
+        std::cout << "[INFO] Completed HNSW index saving process to disk: " << hnsw_data_root << std::endl;
+
+    } catch (const std::filesystem::filesystem_error& e) { /* ... */ }
+      catch (const std::exception& e) { /* ... */ } 
+      catch (...) { /* ... */ }
+}
+\end{minted}
+
+\section{并行化效果与分析}
+测试程序 \mintinline{text}{phase5_large_data_test.cc} 的执行流程如下：
+\begin{enumerate}
+    \item 清理先前测试可能遗留的 KVStore 数据目录 (\mintinline{text}{./kvstore_data_large_test}) 以及用于串行和并行 HNSW 索引保存的目录 (\mintinline{text}{./hnsw_data_large_serial}, \mintinline{text}{./hnsw_data_large_parallel})。
+    \item 初始化 \mintinline{cpp}{KVStore} 实例，此时不加载任何预先存在的 HNSW 索引。
+    \item 从指定的文本文件和嵌入向量文件加载100,000条数据，通过 \mintinline{cpp}{kvstore.put_with_precomputed_embedding} 方法插入到 KVStore 中，这个过程会构建 HNSW 图。
+    \item 记录数据加载和 HNSW 图构建的总时间。
+    \item \textbf{串行保存测试}：调用 \mintinline{cpp}{kvstore.save_hnsw_index_to_disk("./hnsw_data_large_serial", true)}，强制以串行方式保存 HNSW 索引，并记录耗时。
+    \item \textbf{并行保存测试}：调用 \mintinline{cpp}{kvstore.save_hnsw_index_to_disk("./hnsw_data_large_parallel", false)}，以并行方式（线程池默认行为）保存 HNSW 索引，并记录耗时。
+    \item 输出两次保存操作的耗时、保存路径等信息。
+\end{enumerate}
+
+\subsection{并行性能测试结果}
+在与串行测试相同的环境下（100,000条数据），HNSW 索引的并行保存测试结果如下：
+
+\textbf{HNSW 索引并行保存总耗时 (100,000 条目)：111.6622 秒}
+
+\subsection{性能对比与提升}
+将并行保存的性能与之前的串行基准进行对比：
+\begin{itemize}
+    \item \textbf{串行保存时间}：155.1897 秒
+    \item \textbf{并行保存时间}：111.6622 秒
+    \item \textbf{时间节省}：$155.1897 \text{s} - 111.6622 \text{s} = 43.5275 \text{s}$
+    \item \textbf{性能提升百分比}：$(43.5275 / 155.1897) \times 100\% \approx 28.05\%$
+    \item \textbf{加速比}：$155.1897 \text{s} / 111.6622 \text{s} \approx 1.390$
+\end{itemize}
+从数据可以看出，通过并行化改造，HNSW索引的保存时间显著减少，获得了约1.39倍的加速比。这意味着并行版本比串行版本快了大约39\%。
+
+\subsection{效果分析}
+本次并行化设计成功地利用了系统的多核处理能力。通过将每个HNSW节点的独立文件写入操作分配给线程池中的不同线程并发执行，显著减少了整体的墙上时间（wall clock time）。
+
+尽管取得了性能提升，但加速比并未严格遵循CPU核心数量进行线性扩展。这主要是因为HNSW索引的保存过程属于典型的I/O密集型任务。每个并行任务都需要执行多次文件系统操作（创建目录、打开文件、写入数据、关闭文件）。当大量线程并发进行这些操作时，磁盘的物理寻道时间（对于HDD）、控制器处理并发请求的能力（对于SSD的IOPS限制）、以及文件系统本身的元数据管理开销，都可能成为瓶颈。换言之，即使CPU有更多空闲核心，如果磁盘I/O已经饱和，整体性能也难以进一步提高。
+
+此外，线程池本身的调度开销、任务在线程间的切换、以及必要的同步操作（如原子计数器的更新）虽然相比于I/O操作的耗时较小，但也会消耗一部分CPU周期。
+
+尽管如此，1.39倍的加速比仍然证明了并行化策略在此场景下的有效性，特别是在处理大规模HNSW索引时，所节省的时间是相当可观的。
+
+\section{结论与展望}
+本阶段成功地对 \mintinline{cpp}{KVStore} 中 HNSW 索引的保存逻辑 (\mintinline{cpp}{save_hnsw_index_to_disk}) 进行了并行化改造。通过引入线程池，将每个节点的保存操作作为独立任务并发执行，在包含100,000条目的数据集上，相较于串行执行方式，并行化保存获得了约1.39倍的加速比，有效地提升了HNSW索引持久化的效率。
+
+未来的工作可以从以下几个方面考虑进一步优化：
+\begin{itemize}
+    \item \textbf{I/O 操作优化}：
+    \begin{itemize}
+        \item \textbf{合并写入}：研究是否可以将多个节点的元数据或边数据合并到更大的文件中，以减少文件数量和打开/关闭文件的开销。例如，可以考虑将同一批次或同一label范围的节点数据顺序写入一个文件，并记录各自的偏移量。
+        \item \textbf{异步I/O}：对于支持的平台，可以探索使用异步I/O操作（如Linux的io\_uring或Windows的IOCP），使得线程在发起I/O请求后不必阻塞等待，可以继续处理其他计算任务或I/O请求，从而更好地重叠计算与I/O。
+    \end{itemize}
+    \item \textbf{任务粒度与调度优化}：
+    \begin{itemize}
+        \item \textbf{动态任务粒度}：针对不同复杂度的HNSW节点（例如，层级高、连接多的节点可能需要更多I/O），可以考虑动态调整任务的粒度，或者将大节点的保存进一步细分为多个子任务。
+        \item \textbf{线程数调优}：实验不同的线程池大小（例如，固定为物理核心数，或略大于/小于物理核心数），以找到针对当前硬件和I/O特性的最优线程数。
+    \end{itemize}
+    \item \textbf{加载过程并行化}：与保存过程类似，\mintinline{cpp}{KVStore::load_hnsw_index_from_disk} 函数中对各个HNSW节点数据的加载过程也具有明显的并行化潜力，可以作为后续的优化方向。
+\end{itemize}
+总体而言，本次针对HNSW索引保存的并行化实践，验证了在数据密集型且任务可分解的场景下，通过合理的并发设计能够有效提升系统性能。
+
+\end{document} 
